@@ -1,0 +1,35 @@
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Snowflake / credentials
+*.pem
+*.p8
+*.key
+connections.toml
+config.toml
+
+# Virtual environment
+.venv/
+
+# Local source data
+data/
+*.pdf
+*.csv
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor/IDE
+.vscode/*
+!.vscode/extensions.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+logs/

@@ -1,0 +1,157 @@
+/*
+Purpose:
+    Register a Medicaid fee schedule PDF document in the control table.
+    
+Process:
+    1. Read the PDF metadata from the Snowflake stage directory.
+    2. Insert the document when the same file version is not already registered.
+    3. Query the registry to verify registration.
+
+Objects:
+    Source stage: configured by STAGE_NAME
+    Target table: CTL_DOCUMENT_REGISTRY
+    Target file: configured by FILE_NAME
+*/
+
+/*
+Session prerequisites:
+Run 00_config.sql to set DATABASE, SCHEMA, and WAREHOUSE, parameters, and stage name before running this script.
+*/
+
+
+-- Refresh directory metadata after stage files change.
+ALTER STAGE MEDICAID_FEE_SCHEDULE_PDFS REFRESH;
+
+
+-- Capture the current target file metadata once.
+CREATE OR REPLACE TEMP TABLE TEMP_TARGET_STAGE_FILE AS
+SELECT
+    D.RELATIVE_PATH,
+    SPLIT_PART(D.RELATIVE_PATH, '/', -1) AS FILE_NAME,
+    D.SIZE,
+    D.LAST_MODIFIED,
+    D.MD5
+FROM DIRECTORY(@MEDICAID_FEE_SCHEDULE_PDFS) AS D
+WHERE D.RELATIVE_PATH = $FILE_NAME;
+
+
+-- Capture whether this exact file version was already registered.
+CREATE OR REPLACE TEMP TABLE TEMP_MATCHING_REGISTRY_BEFORE AS
+SELECT
+    CDR.DOCUMENT_ID
+FROM CTL_DOCUMENT_REGISTRY AS CDR
+INNER JOIN TEMP_TARGET_STAGE_FILE AS STAGE_FILE
+    ON CDR.STAGE_NAME = $STAGE_NAME
+   AND CDR.RELATIVE_PATH = STAGE_FILE.RELATIVE_PATH
+   AND CDR.FILE_MD5 = STAGE_FILE.MD5;
+
+
+-- Register the current file version only when it is not already registered.
+INSERT INTO CTL_DOCUMENT_REGISTRY (
+    DOCUMENT_TYPE,
+    STATE_CODE,
+    STAGE_NAME,
+    PAGE_COUNT,
+    RELATIVE_PATH,
+    FILE_NAME,
+    FILE_SIZE_BYTES,
+    FILE_LAST_MODIFIED,
+    FILE_MD5
+)
+SELECT
+    $DOCUMENT_TYPE,
+    $STATE_CODE,
+    $STAGE_NAME,
+
+    GET_PDF_PAGE_COUNT(     
+    BUILD_SCOPED_FILE_URL(      -- Build a scoped URL to the file in the stage for the GET_PDF_PAGE_COUNT function.
+        @MEDICAID_FEE_SCHEDULE_PDFS,
+        STAGE_FILE.RELATIVE_PATH
+        )
+    ) AS PAGE_COUNT,
+
+    STAGE_FILE.RELATIVE_PATH,
+    STAGE_FILE.FILE_NAME,
+    STAGE_FILE.SIZE,
+    STAGE_FILE.LAST_MODIFIED,
+    STAGE_FILE.MD5
+
+FROM TEMP_TARGET_STAGE_FILE AS STAGE_FILE
+
+WHERE NOT EXISTS (      -- Prevent duplicate registration of the same file version.
+    SELECT 1
+    FROM CTL_DOCUMENT_REGISTRY AS CDR
+    WHERE CDR.STAGE_NAME = $STAGE_NAME
+      AND CDR.RELATIVE_PATH = STAGE_FILE.RELATIVE_PATH
+      AND CDR.FILE_MD5 = STAGE_FILE.MD5
+);
+
+
+-- Capture the registry state after the insert.
+CREATE OR REPLACE TEMP TABLE TEMP_MATCHING_REGISTRY_AFTER AS
+SELECT
+    CDR.DOCUMENT_ID
+FROM CTL_DOCUMENT_REGISTRY AS CDR
+INNER JOIN TEMP_TARGET_STAGE_FILE AS STAGE_FILE
+    ON CDR.STAGE_NAME = $STAGE_NAME
+   AND CDR.RELATIVE_PATH = STAGE_FILE.RELATIVE_PATH
+   AND CDR.FILE_MD5 = STAGE_FILE.MD5;
+
+
+-- Report the outcome of this registration run.
+SELECT
+    CASE
+        WHEN (SELECT COUNT(*) FROM TEMP_TARGET_STAGE_FILE) = 0
+            THEN 'FILE_NOT_FOUND_IN_STAGE'
+
+        WHEN (SELECT COUNT(*) FROM TEMP_TARGET_STAGE_FILE) > 1
+            THEN 'MULTIPLE_STAGE_MATCHES'
+
+        WHEN (SELECT COUNT(*) FROM TEMP_MATCHING_REGISTRY_BEFORE) > 1
+            THEN 'DUPLICATE_REGISTRY_MATCHES'
+
+        WHEN (SELECT COUNT(*) FROM TEMP_MATCHING_REGISTRY_BEFORE) = 1
+            THEN 'ALREADY_REGISTERED_SAME_FILE_VERSION'
+
+        WHEN (SELECT COUNT(*) FROM TEMP_MATCHING_REGISTRY_AFTER) = 1
+            THEN 'REGISTERED_NEW_FILE_VERSION'
+
+        ELSE 'REGISTRATION_FAILED'
+    END AS REGISTRATION_STATUS,
+
+    (SELECT COUNT(*) FROM TEMP_TARGET_STAGE_FILE)
+        AS STAGE_MATCH_COUNT,
+
+    (SELECT COUNT(*) FROM TEMP_MATCHING_REGISTRY_BEFORE)
+        AS MATCHING_ROWS_BEFORE,
+
+    (SELECT COUNT(*) FROM TEMP_MATCHING_REGISTRY_AFTER)
+        AS MATCHING_ROWS_AFTER,
+
+    (SELECT MAX(DOCUMENT_ID) FROM TEMP_MATCHING_REGISTRY_AFTER)
+        AS MATCHING_DOCUMENT_ID;
+
+
+-- Show only the registry record matching the file currently in the stage.
+SELECT
+    CDR.*
+FROM CTL_DOCUMENT_REGISTRY AS CDR
+INNER JOIN TEMP_TARGET_STAGE_FILE AS STAGE_FILE
+    ON CDR.STAGE_NAME = $STAGE_NAME
+   AND CDR.RELATIVE_PATH = STAGE_FILE.RELATIVE_PATH
+   AND CDR.FILE_MD5 = STAGE_FILE.MD5
+ORDER BY CDR.DOCUMENT_ID DESC;
+
+
+-- Find the registry record matching the exact file currently present in the stage.
+SET DOCUMENT_ID = (
+    SELECT MAX(CDR.DOCUMENT_ID)
+    FROM CTL_DOCUMENT_REGISTRY AS CDR
+    INNER JOIN TEMP_TARGET_STAGE_FILE AS STAGE_FILE
+        ON CDR.STAGE_NAME = $STAGE_NAME
+       AND CDR.RELATIVE_PATH = STAGE_FILE.RELATIVE_PATH
+       AND CDR.FILE_MD5 = STAGE_FILE.MD5
+);
+
+-- Confirm the DOCUMENT_ID selected for downstream pipeline steps.
+SELECT $DOCUMENT_ID AS DOCUMENT_ID;
