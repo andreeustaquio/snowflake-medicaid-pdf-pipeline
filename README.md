@@ -1,4 +1,4 @@
-# ds-intern-2026-aeustaquio-snowflake-project
+# AI-Enabled Snowflake Medicaid PDF Pipeline
 
 Snowflake pipeline that extracts structured Medicaid fee schedule data from state PDF
 documents using Snowflake Cortex `AI_PARSE_DOCUMENT` and `AI_EXTRACT`, and loads
